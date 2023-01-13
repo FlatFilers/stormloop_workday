@@ -1,193 +1,220 @@
 import * as chrono from 'chrono-node'
+import _ from 'lodash'
 import { utcToZonedTime, format } from 'date-fns-tz'
+import parse from 'date-fns/parse'
 import {
+  stdlib,
   Field,
-  GenericFieldOptions,
-  FieldHookDefaults,
-  FullBaseFieldOptions,
+  DateField,
+  Nullable,
+  verifyEgressCycle,
+  makeField,
+  mergeFieldOptions,
 } from '@flatfile/configure'
-import { SchemaILField } from '@flatfile/schema'
+const { StringChainCast, FallbackCast } = stdlib.cast
 
-const GenericDefaults: GenericFieldOptions = {
-  description: '',
-  label: '',
-  type: 'string',
-  primary: false,
-  required: false,
-  unique: false,
-  stageVisibility: {
-    mapping: true,
-    review: true,
-    export: true,
-  },
-  annotations: {
-    default: false,
-    defaultMessage: 'This field was automatically given a default value of',
-    compute: false,
-    computeMessage: 'This value was automatically reformatted - original data:',
-  },
-  getSheetCompute: false,
-}
+type Locales = 'en' | 'fr' | 'nl' | 'ru' | 'de'
 
-export const StringCast = (raw: string | undefined | null): string | null => {
-  if (typeof raw === 'undefined') {
-    return null
-  } else if (raw === null) {
-    return null
-  } else {
+const getChronoDateCast = (locale: Locales) => {
+  const ChronoStringDateCast = (raw: string | Date | null) => {
     if (typeof raw === 'string') {
-      if (raw === '') {
-        return null
+      // use chrono.strict so that we dont get dates from strings like 'tomorrow', 'two weeks later'
+      const parsedResult = chrono[locale].strict.parse(raw, undefined)
+
+      const firstResult = parsedResult[0]
+      if (firstResult === null || firstResult === undefined) {
+        throw new Error(`'${raw}' returned no parse results`)
       }
+      const d = firstResult.date()
+
+      const resStart = firstResult.start
+      const tzCertain = resStart.isCertain('timezoneOffset')
+      const hourCertain = resStart.isCertain('hour')
+      const tzHours = d.getTimezoneOffset() / 60
+
+      if (!resStart.isCertain('year')) {
+        throw new Error(
+          `couldn't parse ${raw} with a certain year.  Please use an unambiguous date format`
+        )
+      }
+
+      if (!resStart.isCertain('month')) {
+        throw new Error(
+          `couldn't parse ${raw} with a certain month.  Please use an unambiguous date format`
+        )
+      }
+
+      if (!resStart.isCertain('day')) {
+        throw new Error(
+          `couldn't parse ${raw} with a certain day.  Please use an unambiguous date format`
+        )
+      }
+
+      // we want all dates to end up in the UTC timezone, and when we
+      // don't have an exact time, default to 00:00:00
+      if (hourCertain === false && tzCertain === false) {
+        //js dates are local TZ by default, we need to work around that
+        //in this case, set the hour to offset the timezone offset, that will bring the time 00:00:00 GMT
+        d.setHours(-1 * tzHours)
+      } else if (hourCertain === true && tzCertain === false) {
+        // if chrono was able to determine the hour, but not the timezone,
+        // back out the timezone offset from the hours stored on d
+        d.setHours(d.getHours() - tzHours)
+      } else if (hourCertain === false && tzCertain === true) {
+        //I don't know how this parsing result would be possible we should
+        //probably resort to 00:00:00 GMT, but to be extra strict, until
+        //we have more information, we'll throw an error
+        throw new Error(
+          `Don't know how to parse for hourCertain === false && tzCertain === true for ${raw}`
+        )
+      } else if (hourCertain === true && tzCertain === true) {
+        //we were able to absolutely determin the hour and timezone, nothing to do here
+        return d
+      }
+
+      return d
+    } else if (_.isDate(raw)) {
+      return raw
+    } else {
+      throw new Error(
+        `unexpected type in ChronoStringDateCast for val ${raw} typeof ${typeof raw}`
+      )
     }
-    return raw
   }
+  return ChronoStringDateCast
 }
 
-export const StringCastCompose = (otherFunc: (raw: string) => any) => {
-  const innerCast = (raw: string | undefined | null): string | null => {
-    const stringVal = StringCast(raw)
-    if (stringVal === null) {
-      return null
-    }
-    return otherFunc(stringVal)
-  }
-  return innerCast
-}
+/**
+ * GMTFormatDate formats all dates relative to Greenwich Mean Time.
+ * This means that the same format string will be regardless of the
+ * system timezone.
+ */
 
-const ChronoStringDateCast = (raw: string) => {
-  // use chrono.strict so that we dont get dates from strings like 'tomorrow', 'two weeks later'
-  const parsedResult = chrono.strict.parse(raw, undefined)
-
-  const firstResult = parsedResult[0]
-  if (firstResult === null || firstResult === undefined) {
-    throw new Error(`'${raw}' returned no parse results`)
-  }
-  const d = firstResult.date()
-
-  const resStart = firstResult.start
-  const tzCertain = resStart.isCertain('timezoneOffset')
-  const hourCertain = resStart.isCertain('hour')
-  const tzHours = d.getTimezoneOffset() / 60
-
-  if (!resStart.isCertain('year')) {
-    throw new Error(
-      `couldn't parse ${raw} with a certain date.  Please use an unambiguous date format`
-    )
-  }
-
-  if (!resStart.isCertain('month')) {
-    throw new Error(
-      `couldn't parse ${raw} with a certain month.  Please use an unambiguous date format`
-    )
-  }
-
-  if (!resStart.isCertain('day')) {
-    throw new Error(
-      `couldn't parse ${raw} with a certain day.  Please use an unambiguous date format`
-    )
-  }
-
-  //console.log(firstResult)
-  // we want all dates to end up in the UTC timezone, and when we
-  // don't have an exact time, default to 00:00:00
-  if (hourCertain === false && tzCertain === false) {
-    //js dates are local TZ by default, we need to work around that
-    //in this case, set the hour to offset the timezone offset, that will bring the time 00:00:00 GMT
-    d.setHours(-1 * tzHours)
-  } else if (hourCertain === true && tzCertain === false) {
-    // if chrono was able to determine the hour, but not the timezone,
-    // back out the timezone offset from the hours stored on d
-    d.setHours(d.getHours() - tzHours)
-  } else if (hourCertain === false && tzCertain === true) {
-    //I don't know how this parsing result would be possible we should
-    //probably resort to 00:00:00 GMT, but to be extra strict, until
-    //we have more information, we'll throw an error
-    throw new Error(
-      `Don't know how to parse for hourCertain === false && tzCertain === true for ${raw}`
-    )
-  } else if (hourCertain === true && tzCertain === true) {
-    //we were able to absolutely determin the hour and timezone, nothing to do here
-    //console.log(`chronoDate cast recieved ${raw} returning ${d} ${typeof d}`)
-    return d
-  }
-
-  return d
-}
-
-export const zFormat = (val: Date, fString: string): string => {
+export const GMTFormatDate = (val: Date, formatString: string): string => {
   const prevailingTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const d = new Date()
   const tzHours = d.getTimezoneOffset() / 60
   const val2 = new Date(val)
   val2.setHours(val2.getHours() + tzHours)
   const utcDate = utcToZonedTime(val2, prevailingTimezone)
-  return format(utcDate, fString)
+  return format(utcDate, formatString)
 }
 
-export const ChronoDateCast = StringCastCompose(ChronoStringDateCast)
+export const ChronoDateCast = StringChainCast(getChronoDateCast('en'))
 
-type O = Record<string, any>
-type T = Date
-type PartialBaseFieldsAndOptions = Partial<FullBaseFieldOptions<T, O>> & {
-  fString?: string
+const egressDebug = (field: Field<any>, castVal: any) => {
+  //cast / egressFormat cycle must converge to the same value,
+  //otherwise throw an error because the user will lose dta
+  const ef = field.options.egressFormat
+  if (ef === false) {
+    console.log('egressDebug called on a field without egressFormat set')
+    return
+  }
+
+  const egressResult = ef(castVal)
+  try {
+    const recast = field.options.cast(egressResult)
+    console.log(
+      `castVal ${castVal} becomes ${egressResult} after egressFormat, which when cast gives ${recast}`
+    )
+  } catch (e: any) {
+    console.log(
+      `castVal ${castVal} becomes ${egressResult} after egressFormat, casting again throws an error of ${e}`
+    )
+  }
 }
 
-export const SmartDateField = (
-  options?: string | PartialBaseFieldsAndOptions
-) => {
-  // if labelOptions is a string, then it is the label
-  let passedOptions: PartialBaseFieldsAndOptions
-  if (options === undefined) {
-    passedOptions = {}
-  } else if (typeof options === 'string') {
-    passedOptions = { label: options }
-  } else {
-    passedOptions = options
-  }
-
-  const passedStageVisibility = (passedOptions as SchemaILField)
-    ?.stageVisibility
-
-  const stageVisibility = {
-    ...GenericDefaults.stageVisibility,
-    ...passedStageVisibility,
-  }
-
-  const passedAnnotations = (passedOptions as SchemaILField)?.annotations
-
-  const annotations = {
-    ...GenericDefaults.annotations,
-    ...passedAnnotations,
-  }
-
-  const fullOpts = {
-    ...GenericDefaults,
-    ...FieldHookDefaults<T>(),
-    cast: ChronoDateCast,
+export const SmartDateField = makeField<
+  Date,
+  { formatString?: string; extraParseString?: string; locale?: Locales }
+>(DateField({}), {}, (mergedOpts, passedOptions) => {
+  const defaultedPassedOptions = {
+    ...{
+      formatString: "yyyy-MM-dd'T'HH:mm'Z'",
+      extraParseString: undefined,
+      locale: 'en',
+    },
     ...passedOptions,
-    stageVisibility,
-    annotations,
   }
 
-  let fString = passedOptions.fString
-    ? passedOptions.fString
-    : "yyyy-MM-dd'T'HH:mm:ss.000'Z'"
+  const { formatString, extraParseString, locale } = defaultedPassedOptions
 
-  fullOpts.egressFormat = (val: Date | string): string => {
+  if (_.keys(passedOptions).includes('cast')) {
+    throw new Error(
+      `Cannot instantiate this field with an overridden cast function`
+    )
+  }
+  if (_.keys(passedOptions).includes('egressFormat')) {
+    throw new Error(
+      `Cannot instantiate this field with an overridden egressFormat function`
+    )
+  }
+
+  //@ts-ignore
+  const localeCast = getChronoDateCast(locale)
+
+  let cast
+  if (extraParseString) {
+    cast = FallbackCast(
+      localeCast,
+      StringChainCast((val: string | Date): Nullable<Date> => {
+        if (typeof val === 'string') {
+          const parsed = parse(val, extraParseString, new Date())
+          const reformatted = format(parsed, 'yyyy-MM-dd')
+          const final = ChronoDateCast(reformatted)
+          return final
+        } else if (_.isDate(val)) {
+          return val
+        } else {
+          throw new Error(`unexpected type for val ${val} typeof ${typeof val}`)
+        }
+      })
+    )
+  } else {
+    cast = localeCast
+  }
+
+  const egressFormat = (val: Date | string): string => {
     if (typeof val === 'string') {
       return val
     }
     try {
-      return zFormat(val, fString)
+      const output = GMTFormatDate(val, formatString)
+      return output
     } catch (e: any) {
-      console.log(`error formatting ${val} typeof ${typeof val}`)
-      console.log(e)
+      console.log(
+        `error calling GMTFormatDate on ${val} of type ${typeof val} with formatString of ${formatString}. Err of ${e}`
+      )
+      //trying to return something that is obviously an error
       //@ts-ignore
       return NaN
     }
   }
+  const newOpts = {
+    cast,
+    egressFormat,
+  }
+  const f = new Field(mergeFieldOptions(mergedOpts, newOpts))
+  const testEgressCycle = (d: Date) => {
+    try {
+      //@ts-ignore
+      if (!verifyEgressCycle(f, d)) {
+        egressDebug(f, d)
+        throw new Error(
+          `Error: instantiating a SmartDateField with a formatString of ${formatString}, and locale of '${locale}'.  will result in data loss or unexpected behavior`
+        )
+      }
+    } catch (e: any) {
+      egressDebug(f, d)
+      throw new Error(
+        `Error: instantiating a SmartDateField with a formatString of ${formatString}, and locale of '${locale}'.  will result in data loss or unexpected behavior`
+      )
+    }
+  }
+  //pretty much any date, nothing notable.  ChronoDateCast is fine here,  we just want a date
+  testEgressCycle(ChronoDateCast('2009-02-24T00:00:00.000Z') as Date)
+  //this will pick up month/date ambiguity... and its interaction between locale and formatString
+  testEgressCycle(ChronoDateCast('2009-02-05T00:00:00.000Z') as Date)
 
-  const field = new Field<T, O>(fullOpts as FullBaseFieldOptions<T, O>)
-  return field
-}
+  return f
+})

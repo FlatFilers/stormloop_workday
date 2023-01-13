@@ -443,7 +443,7 @@ const Employees = new Sheet('Employees', {
 
   DateOfBirth: SmartDateField({
     label: 'Date Of Birth',
-    fString: 'yyyy-MM-dd',
+    formatString: 'yyyy-MM-dd',
     required: false,
     primary: false,
     unique: false,
@@ -482,7 +482,7 @@ const Employees = new Sheet('Employees', {
 
   EmploymentDate: SmartDateField({
     label: 'Employment Date',
-    fString: 'yyyy-MM-dd',
+    formatString: 'yyyy-MM-dd',
     required: false,
     primary: false,
     unique: false,
@@ -498,7 +498,7 @@ const Employees = new Sheet('Employees', {
 
   TerminationDate: SmartDateField({
     label: 'Termination Date',
-    fString: 'yyyy-MM-dd',
+    formatString: 'yyyy-MM-dd',
     required: false,
     primary: false,
     unique: false,
@@ -672,7 +672,7 @@ const Employees = new Sheet('Employees', {
 
   SeniorityDate: SmartDateField({
     label: 'Seniority Date',
-    fString: 'yyyy-MM-dd',
+    formatString: 'yyyy-MM-dd',
     required: false,
     primary: false,
     unique: false,
